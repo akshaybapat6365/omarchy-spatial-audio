@@ -1,0 +1,285 @@
+# 3D Spatial Audio + Warm Richness speaker engine (Choueiri FDTR-XTC)
+# Template rendered by install.sh into:
+#   ${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/omarchy-speaker-engine.conf.d/91-spatial-fdtr.conf
+#
+# Placeholders substituted at install time:
+#   @DATA_DIR@     Data directory holding synthesized 512-tap FDTR-XTC WAV kernels
+#   @LADSPA_SO@    Compiled hard-RT Rust LADSPA plugin (libomarchy_spatial_fdtr.so)
+#   @SPEAKER_IRS@  Optional measured speaker EQ FIR (.irs / .wav) or flat unity impulse
+#   @SOFA_FILE@    MIT KEMAR normal-pinna HRTF SOFA file
+#   @TARGET_SINK@  Physical PipeWire ALSA speaker sink node.name
+#
+# Both filter-chain sinks use distinct node names (omarchy_speaker_spatial and
+# omarchy_speaker_spatial_71) and passive playback streams, so they coexist cleanly
+# with other speaker-engine drop-ins with zero routing collisions and zero idle CPU.
+
+context.modules = [
+  # ---------------------------------------------------------------------------
+  # 1. Primary Stereo-in 3D Spatial Engine ("Laptop Speakers · 3D Spatial")
+  #    Warm Richness + Parallel Dual-Bank Chebyshev Missing-Fundamental Bass +
+  #    ISO 226 Warmth + 4-Convolver 2x2 Choueiri FDTR-XTC + True-Peak Limiter
+  #    (+7.0 dB LOUDNESS_DRIVE_DB into -1.0 dBTP brickwall ceiling).
+  # ---------------------------------------------------------------------------
+  { name = libpipewire-module-filter-chain
+    flags = [ nofail ]
+    args = {
+      node.description = "Laptop Speakers · 3D Spatial"
+      media.name       = "Laptop Speakers · 3D Spatial"
+      filter.graph = {
+        nodes = [
+          { type = builtin name = in_l label = copy }
+          { type = builtin name = in_r label = copy }
+
+          # Optional room/speaker EQ FIR correction (or flat unity impulse)
+          { type = builtin name = fir_l label = convolver
+            config = { filename = "@SPEAKER_IRS@" channel = 0 gain = @SPEAKER_IRS_GAIN@ latency = 0.0 } }
+          { type = builtin name = fir_r label = convolver
+            config = { filename = "@SPEAKER_IRS@" channel = 1 gain = @SPEAKER_IRS_GAIN@ latency = 0.0 } }
+
+          # 180 Hz 8th-order Butterworth high-pass (protects micro-woofers from subsonic excursion)
+          { type = lv2 name = hp plugin = "http://lsp-plug.in/plugins/lv2/filter_stereo"
+            control = { "g_in" = 1.0 "g_out" = 1.0 "ft" = 1 "fm" = 2 "s" = 3 "f" = 180.0 "w" = 4.0 "g" = 1.0 "q" = 0.0 "mode" = 0 } }
+
+          # Warm · Rich 4-band multiband dynamics
+          { type = lv2 name = mbc plugin = "http://lsp-plug.in/plugins/lv2/sc_mb_compressor_stereo"
+            control = { "mode" = 1 "g_in" = 1.0 "g_out" = 1.0 "g_dry" = 0.0 "g_wet" = 1.0 "ssplit" = 0 "envb" = 0 "ce_0" = 1 "cm_0" = 0 "al_0" = 0.2511886432 "at_0" = 30.0 "rrl_0" = 0.1258925412 "rt_0" = 140.0 "cr_0" = 1.5 "kn_0" = 0.5011872336 "mk_0" = 1.0 "scm_0" = 1 "scs_0" = 0 "scr_0" = 10.0 "scp_0" = 1.0 "bth_0" = 0.0002511886432 "bsa_0" = 1.0 "sla_0" = 0 "cbe_1" = 1 "sf_1" = 220.0 "ce_1" = 1 "cm_1" = 0 "al_1" = 0.2818382931 "at_1" = 25.0 "rrl_1" = 0.1412537545 "rt_1" = 110.0 "cr_1" = 1.4 "kn_1" = 0.5011872336 "mk_1" = 1.0 "scm_1" = 1 "scs_1" = 0 "scr_1" = 10.0 "scp_1" = 1.0 "bth_1" = 0.0002511886432 "bsa_1" = 1.0 "sla_1" = 0 "cbe_2" = 1 "sf_2" = 1800.0 "ce_2" = 1 "cm_2" = 0 "al_2" = 0.316227766 "at_2" = 18.0 "rrl_2" = 0.1584893192 "rt_2" = 80.0 "cr_2" = 1.3 "kn_2" = 0.5011872336 "mk_2" = 1.0 "scm_2" = 1 "scs_2" = 0 "scr_2" = 10.0 "scp_2" = 1.0 "bth_2" = 0.0002511886432 "bsa_2" = 1.0 "sla_2" = 0 "cbe_3" = 1 "sf_3" = 6000.0 "ce_3" = 1 "cm_3" = 0 "al_3" = 0.3548133892 "at_3" = 12.0 "rrl_3" = 0.177827941 "rt_3" = 60.0 "cr_3" = 1.2 "kn_3" = 0.5011872336 "mk_3" = 1.0 "scm_3" = 1 "scs_3" = 0 "scr_3" = 10.0 "scp_3" = 1.0 "bth_3" = 0.0002511886432 "bsa_3" = 1.0 "sla_3" = 0 "cbe_4" = 0 "cbe_5" = 0 "cbe_6" = 0 "cbe_7" = 0 } }
+
+          # Parallel Dual-Bank Chebyshev Missing-Fundamental Bass (taps full-range 40-150 Hz BEFORE 180 Hz HP, 0 ms latency)
+          { type = ladspa name = bass_gen
+            plugin = "@LADSPA_SO@"
+            label  = "omarchy_spatial_fdtr"
+            control = {
+              "XTC Mix"          = 0.0
+              "Dry Mix"          = 0.0
+              "Bass Harmonics"   = 0.42
+              "Harmonic Warmth"  = 0.0
+              "Loudness Contour" = 0.0
+              "Drive (dB)"       = 0.0
+              "Ceiling (dBFS)"   = -1.0
+              "Enable Limiter"   = 0.0
+            } }
+          { type = builtin name = h_fir_l label = convolver
+            config = { filename = "@SPEAKER_IRS@" channel = 0 gain = @SPEAKER_IRS_GAIN@ latency = 0.0 } }
+          { type = builtin name = h_fir_r label = convolver
+            config = { filename = "@SPEAKER_IRS@" channel = 1 gain = @SPEAKER_IRS_GAIN@ latency = 0.0 } }
+
+          # Sum main Warm · Rich stereo path with perceived bass harmonics
+          { type = builtin name = sum_l label = mixer control = { "Gain 1" = 1.0 "Gain 2" = 1.0 } }
+          { type = builtin name = sum_r label = mixer control = { "Gain 1" = 1.0 "Gain 2" = 1.0 } }
+
+          # ISO 226:2023 warm body shelf + subtle even-harmonic analog warmth (0 ms latency)
+          { type = ladspa name = warm_stage
+            plugin = "@LADSPA_SO@"
+            label  = "omarchy_spatial_fdtr"
+            control = {
+              "XTC Mix"          = 0.0
+              "Dry Mix"          = 1.0
+              "Bass Harmonics"   = 0.0
+              "Harmonic Warmth"  = 0.14
+              "Loudness Contour" = 0.25
+              "Drive (dB)"       = 0.0
+              "Ceiling (dBFS)"   = -1.0
+              "Enable Limiter"   = 0.0
+            } }
+
+          # 4-Convolver 2x2 Choueiri FDTR-XTC Matrix (512 taps @ 48 kHz = 5.333 ms causal delay)
+          #   <200 Hz unity bypass | 200-2600 Hz 13.3 dB XTC | 3.29 kHz comb damped | >6 kHz air intact
+          { type = builtin name = xtc_in_l label = copy }
+          { type = builtin name = xtc_in_r label = copy }
+          { type = builtin name = conv_ll label = convolver
+            config = { filename = "@DATA_DIR@/kernels/h_ll.wav" channel = 0 gain = 1.0 latency = 0.0 } }
+          { type = builtin name = conv_lr label = convolver
+            config = { filename = "@DATA_DIR@/kernels/h_lr.wav" channel = 0 gain = 1.0 latency = 0.0 } }
+          { type = builtin name = conv_rl label = convolver
+            config = { filename = "@DATA_DIR@/kernels/h_rl.wav" channel = 0 gain = 1.0 latency = 0.0 } }
+          { type = builtin name = conv_rr label = convolver
+            config = { filename = "@DATA_DIR@/kernels/h_rr.wav" channel = 0 gain = 1.0 latency = 0.0 } }
+          { type = builtin name = xtc_l label = mixer control = { "Gain 1" = 1.0 "Gain 2" = 1.0 } }
+          { type = builtin name = xtc_r label = mixer control = { "Gain 1" = 1.0 "Gain 2" = 1.0 } }
+
+          # Declared total chain latency (256 FDTR + 604 LSP limiter = 860 samples = 17.917 ms)
+          { type = builtin name = latency_l label = delay control = { "Delay (s)" = 0.0 } config = { "max-delay" = 0.001 latency = 0.0179166667 } }
+          { type = builtin name = latency_r label = delay control = { "Delay (s)" = 0.0 } config = { "max-delay" = 0.001 latency = 0.0179166667 } }
+
+          # 110 Hz final driver protection + LSP True-Peak Limiter (+7.0 dB LOUDNESS_DRIVE_DB -> -1.0 dBTP)
+          { type = lv2 name = prot plugin = "http://lsp-plug.in/plugins/lv2/filter_stereo"
+            control = { "g_in" = 1.0 "g_out" = 1.0 "ft" = 1 "fm" = 2 "s" = 1 "f" = 110.0 "w" = 4.0 "g" = 1.0 "q" = 0.0 "mode" = 0 } }
+          { type = lv2 name = lim plugin = "http://lsp-plug.in/plugins/lv2/sc_limiter_stereo"
+            control = { "g_in" = 2.2387211386 "g_out" = 1.0 "mode" = 0 "ovs" = 22 "dith" = 0 "th" = 0.8912509381 "lk" = 10.0 "at" = 5.0 "rt" = 20.0 "alr" = 0 "boost" = 0 "slink" = 100.0 "extsc" = 0 "alr_at" = 5.0 "alr_rt" = 50.0 "knee" = 1.0 "smooth" = -5.0 } }
+        ]
+        links = [
+          { output = "in_l:Out"       input = "fir_l:In" }
+          { output = "in_r:Out"       input = "fir_r:In" }
+          { output = "fir_l:Out"      input = "hp:in_l" }
+          { output = "fir_r:Out"      input = "hp:in_r" }
+          { output = "hp:out_l"       input = "mbc:in_l" }
+          { output = "hp:out_r"       input = "mbc:in_r" }
+
+          { output = "in_l:Out"       input = "bass_gen:In L" }
+          { output = "in_r:Out"       input = "bass_gen:In R" }
+          { output = "bass_gen:Out L" input = "h_fir_l:In" }
+          { output = "bass_gen:Out R" input = "h_fir_r:In" }
+
+          { output = "mbc:out_l"      input = "sum_l:In 1" }
+          { output = "h_fir_l:Out"    input = "sum_l:In 2" }
+          { output = "mbc:out_r"      input = "sum_r:In 1" }
+          { output = "h_fir_r:Out"    input = "sum_r:In 2" }
+
+          { output = "sum_l:Out"      input = "warm_stage:In L" }
+          { output = "sum_r:Out"      input = "warm_stage:In R" }
+          { output = "warm_stage:Out L" input = "xtc_in_l:In" }
+          { output = "warm_stage:Out R" input = "xtc_in_r:In" }
+
+          { output = "xtc_in_l:Out"   input = "conv_ll:In" }
+          { output = "xtc_in_r:Out"   input = "conv_lr:In" }
+          { output = "xtc_in_l:Out"   input = "conv_rl:In" }
+          { output = "xtc_in_r:Out"   input = "conv_rr:In" }
+          { output = "conv_ll:Out"    input = "xtc_l:In 1" }
+          { output = "conv_lr:Out"    input = "xtc_l:In 2" }
+          { output = "conv_rl:Out"    input = "xtc_r:In 1" }
+          { output = "conv_rr:Out"    input = "xtc_r:In 2" }
+
+          { output = "xtc_l:Out"      input = "latency_l:In" }
+          { output = "xtc_r:Out"      input = "latency_r:In" }
+          { output = "latency_l:Out"  input = "prot:in_l" }
+          { output = "latency_r:Out"  input = "prot:in_r" }
+          { output = "prot:out_l"     input = "lim:in_l" }
+          { output = "prot:out_r"     input = "lim:in_r" }
+        ]
+        inputs  = [ "in_l:In" "in_r:In" ]
+        outputs = [ "lim:out_l" "lim:out_r" ]
+      }
+      audio.channels = 2
+      audio.position = [ FL FR ]
+      capture.props = {
+        node.name   = "omarchy_speaker_spatial"
+        media.class = Audio/Sink
+      }
+      playback.props = {
+        node.name           = "omarchy_speaker_spatial_output"
+        node.passive        = true
+        node.dont-move      = true
+        state.restore-props = false
+        target.object       = "@TARGET_SINK@"
+        node.dont-fallback  = true
+        node.linger         = true
+      }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 2. 7.1 Virtual Surround SOFA -> Transaural FDTR-XTC Sink
+  #    ("Laptop Speakers · 7.1 Spatial SOFA")
+  #    MIT KEMAR normal-pinna HRTF spatializer -> Speaker EQ FIR ->
+  #    Native Rust Fused LADSPA (Bass Harmonics + ISO 226 + 2x2 FDTR-XTC +
+  #    Lookahead True-Peak Limiter with +7.0 dB drive) -> 110 Hz Protection.
+  # ---------------------------------------------------------------------------
+  { name = libpipewire-module-filter-chain
+    flags = [ nofail ]
+    args = {
+      node.description = "Laptop Speakers · 7.1 Spatial SOFA"
+      media.name       = "Laptop Speakers · 7.1 Spatial SOFA"
+      filter.graph = {
+        nodes = [
+          { type = sofa label = spatializer name = sp_fl
+            config  = { filename = "@SOFA_FILE@" normalize = true }
+            control = { "Azimuth" = 30.0 "Elevation" = 0.0 "Radius" = 1.4 } }
+          { type = sofa label = spatializer name = sp_fr
+            config  = { filename = "@SOFA_FILE@" normalize = true }
+            control = { "Azimuth" = -30.0 "Elevation" = 0.0 "Radius" = 1.4 } }
+          { type = sofa label = spatializer name = sp_fc
+            config  = { filename = "@SOFA_FILE@" normalize = true }
+            control = { "Azimuth" = 0.0 "Elevation" = 0.0 "Radius" = 1.4 } }
+          { type = builtin label = copy name = sp_lfe }
+          { type = sofa label = spatializer name = sp_rl
+            config  = { filename = "@SOFA_FILE@" normalize = true }
+            control = { "Azimuth" = 135.0 "Elevation" = 0.0 "Radius" = 1.4 } }
+          { type = sofa label = spatializer name = sp_rr
+            config  = { filename = "@SOFA_FILE@" normalize = true }
+            control = { "Azimuth" = -135.0 "Elevation" = 0.0 "Radius" = 1.4 } }
+          { type = sofa label = spatializer name = sp_sl
+            config  = { filename = "@SOFA_FILE@" normalize = true }
+            control = { "Azimuth" = 90.0 "Elevation" = 0.0 "Radius" = 1.4 } }
+          { type = sofa label = spatializer name = sp_sr
+            config  = { filename = "@SOFA_FILE@" normalize = true }
+            control = { "Azimuth" = -90.0 "Elevation" = 0.0 "Radius" = 1.4 } }
+
+          { type = builtin label = mixer name = mix_l
+            control = { "Gain 1" = 0.75 "Gain 2" = 0.75 "Gain 3" = 0.707 "Gain 4" = 0.707 "Gain 5" = 0.70 "Gain 6" = 0.70 "Gain 7" = 0.70 "Gain 8" = 0.70 } }
+          { type = builtin label = mixer name = mix_r
+            control = { "Gain 1" = 0.75 "Gain 2" = 0.75 "Gain 3" = 0.707 "Gain 4" = 0.707 "Gain 5" = 0.70 "Gain 6" = 0.70 "Gain 7" = 0.70 "Gain 8" = 0.70 } }
+
+          # Optional room/speaker EQ FIR correction (or flat unity impulse)
+          { type = builtin name = fir_l label = convolver
+            config = { filename = "@SPEAKER_IRS@" channel = 0 gain = @SPEAKER_IRS_GAIN@ latency = 0.0 } }
+          { type = builtin name = fir_r label = convolver
+            config = { filename = "@SPEAKER_IRS@" channel = 1 gain = @SPEAKER_IRS_GAIN@ latency = 0.0 } }
+
+          # Native Rust Fused 3D Spatial + Warmth + Missing-Fundamental Bass + Lookahead True-Peak Limiter
+          { type = ladspa name = spatial_fused
+            plugin = "@LADSPA_SO@"
+            label  = "omarchy_spatial_fdtr"
+            control = {
+              "XTC Mix"          = 1.0
+              "Dry Mix"          = 1.0
+              "Bass Harmonics"   = 0.38
+              "Harmonic Warmth"  = 0.16
+              "Loudness Contour" = 0.25
+              "Drive (dB)"       = 7.0
+              "Ceiling (dBFS)"   = -1.0
+              "Enable Limiter"   = 1.0
+            } }
+
+          # Final 110 Hz woofer excursion guard
+          { type = lv2 name = prot plugin = "http://lsp-plug.in/plugins/lv2/filter_stereo"
+            control = { "g_in" = 1.0 "g_out" = 1.0 "ft" = 1 "fm" = 2 "s" = 1 "f" = 110.0 "w" = 4.0 "g" = 1.0 "q" = 0.0 "mode" = 0 } }
+        ]
+        links = [
+          { output = "sp_fl:Out L" input = "mix_l:In 1" }
+          { output = "sp_fr:Out L" input = "mix_l:In 2" }
+          { output = "sp_fc:Out L" input = "mix_l:In 3" }
+          { output = "sp_lfe:Out"  input = "mix_l:In 4" }
+          { output = "sp_rl:Out L" input = "mix_l:In 5" }
+          { output = "sp_rr:Out L" input = "mix_l:In 6" }
+          { output = "sp_sl:Out L" input = "mix_l:In 7" }
+          { output = "sp_sr:Out L" input = "mix_l:In 8" }
+
+          { output = "sp_fl:Out R" input = "mix_r:In 1" }
+          { output = "sp_fr:Out R" input = "mix_r:In 2" }
+          { output = "sp_fc:Out R" input = "mix_r:In 3" }
+          { output = "sp_lfe:Out"  input = "mix_r:In 4" }
+          { output = "sp_rl:Out R" input = "mix_r:In 5" }
+          { output = "sp_rr:Out R" input = "mix_r:In 6" }
+          { output = "sp_sl:Out R" input = "mix_r:In 7" }
+          { output = "sp_sr:Out R" input = "mix_r:In 8" }
+
+          { output = "mix_l:Out"           input = "fir_l:In" }
+          { output = "mix_r:Out"           input = "fir_r:In" }
+          { output = "fir_l:Out"           input = "spatial_fused:In L" }
+          { output = "fir_r:Out"           input = "spatial_fused:In R" }
+          { output = "spatial_fused:Out L" input = "prot:in_l" }
+          { output = "spatial_fused:Out R" input = "prot:in_r" }
+        ]
+        inputs  = [ "sp_fl:In" "sp_fr:In" "sp_fc:In" "sp_lfe:In" "sp_rl:In" "sp_rr:In" "sp_sl:In" "sp_sr:In" ]
+        outputs = [ "prot:out_l" "prot:out_r" ]
+      }
+      capture.props = {
+        node.name      = "omarchy_speaker_spatial_71"
+        media.class    = Audio/Sink
+        audio.channels = 8
+        audio.position = [ FL FR FC LFE RL RR SL SR ]
+      }
+      playback.props = {
+        node.name           = "omarchy_speaker_spatial_71_output"
+        node.passive        = true
+        node.dont-move      = true
+        state.restore-props = false
+        audio.channels      = 2
+        audio.position      = [ FL FR ]
+        target.object       = "@TARGET_SINK@"
+        node.dont-fallback  = true
+        node.linger         = true
+      }
+    }
+  }
+]

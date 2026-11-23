@@ -1,0 +1,8 @@
+/target/
+/lib/
+kernels/*.wav
+pkg/
+src/*.o
+*.pkg.tar.*
+__pycache__/
+*.pyc

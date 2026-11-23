@@ -1,0 +1,23 @@
+{
+  "device": "Dell XPS 17 9720",
+  "speaker_span_cm": 34.0,
+  "listening_distance_cm": 55.0,
+  "full_span_deg": 34.35,
+  "itd_us": 152.0,
+  "comb_singularity_hz": 3289.47,
+  "sample_rate_hz": 48000,
+  "taps": 512,
+  "causal_delay_samples": 256,
+  "causal_delay_ms": 5.3333,
+  "xtc_200_2600_mean_db": 13.317,
+  "xtc_200_2600_net_db": 9.755,
+  "xtc_300_2600_mean_db": 13.824,
+  "xtc_2600_5500_mean_db": 11.485,
+  "mono_sum_max_ripple_db": 0.000000,
+  "max_hll_gain_db": 1.122,
+  "max_hlr_gain_db": -4.975,
+  "max_side_gain_db": 3.402,
+  "offaxis_3cm_mean_db": 11.715,
+  "offaxis_5cm_mean_db": 9.023,
+  "all_passed": true
+}

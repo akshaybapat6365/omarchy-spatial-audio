@@ -1,0 +1,20 @@
+[package]
+name = "omarchy-spatial-audio"
+version = "0.1.0"
+edition = "2021"
+description = "Studio-grade Choueiri FDTR 3D Spatial Audio & Warm Richness DSP engine for Dell XPS 17 9720 (Omarchy Linux)"
+
+[lib]
+name = "omarchy_spatial_fdtr"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "omarchy-spatial-dsp"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

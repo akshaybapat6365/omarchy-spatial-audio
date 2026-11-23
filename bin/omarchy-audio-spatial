@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+# omarchy-audio-spatial — 1-second live switcher & offline verifier for
+# Choueiri FDTR 3D Spatial Audio on PipeWire (Omarchy Linux).
+#
+# Usage:
+#   omarchy-audio-spatial status          Show active engine, mic-monitor guard, and staged kernels
+#   omarchy-audio-spatial spatial         Switch live to PipeWire 3D Spatial (Stereo + 2x2 FDTR-XTC)
+#   omarchy-audio-spatial spatial-71      Switch live to PipeWire 7.1 SOFA Virtual Surround + FDTR-XTC
+#   omarchy-audio-spatial warm            Switch back to EasyEffects Warm (or default speaker profile)
+#   omarchy-audio-spatial rollback        Alias of warm (restores pre-spatial snapshot in <2s)
+#   omarchy-audio-spatial verify          Run full offline Rust + LADSPA + PipeWire verification suite
+#   omarchy-audio-spatial test-offline    Alias of verify
+set -euo pipefail
+
+DATA_DIR="${OMARCHY_SPATIAL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-spatial-audio}"
+XDG_CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
+
+DSP_BIN="$DATA_DIR/bin/omarchy-spatial-dsp"
+LADSPA_SO="$DATA_DIR/lib/libomarchy_spatial_fdtr.so"
+LADSPA_TEST="$DATA_DIR/bin/verify_ladspa"
+KERNELS_DIR="$DATA_DIR/kernels"
+PW_VALIDATOR="$DATA_DIR/scripts/verify_pipewire_config.py"
+SPATIAL_CONF="$XDG_CFG/pipewire/omarchy-speaker-engine.conf.d/91-spatial-fdtr.conf"
+SOFA_FILE="${OMARCHY_SPATIAL_SOFA:-/usr/share/libmysofa/MIT_KEMAR_normal_pinna.sofa}"
+
+EE_UNIT="easyeffects-speaker-dsp.service"
+ENGINE_UNIT="omarchy-speaker-engine.service"
+CONTROLLER_UNIT="omarchy-speaker-dsp-controller.service"
+SPATIAL_SINK="omarchy_speaker_spatial"
+SPATIAL_71_SINK="omarchy_speaker_spatial_71"
+EE_SINK="easyeffects_sink"
+PHYS_SINK_REGEX='^alsa_output\\..*(Speaker|analog-stereo).*sink$'
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+PROFILE_STATE="$STATE_DIR/speaker-profile"
+SNAPSHOT_FILE="$STATE_DIR/spatial-audio-snapshot.json"
+NO_MIC_DROPIN="$XDG_CFG/systemd/user/easyeffects-speaker-dsp.service.d/no-mic-monitor.conf"
+EE_RC="$XDG_CFG/easyeffects/db/easyeffectsrc"
+BT_GUARD="$XDG_CFG/wireplumber/wireplumber.conf.d/51-bluetooth-no-phone-audio.conf"
+
+sink_present() {
+  pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$1"
+}
+
+physical_speaker_sink() {
+  pactl list short sinks 2>/dev/null | awk -v re="$PHYS_SINK_REGEX" '$2 ~ re {print $2; exit}'
+}
+
+check_mic_monitor_safe() {
+  local dropin_ok="MISSING" rc_val="unknown" bt_ok="MISSING"
+  [[ -f "$NO_MIC_DROPIN" ]] && dropin_ok="OK"
+  [[ -f "$BT_GUARD" ]] && bt_ok="OK"
+  if [[ -f "$EE_RC" ]]; then
+    rc_val="$(awk -F= '/^listenToMic=/{print $2; exit}' "$EE_RC" 2>/dev/null || echo unknown)"
+  fi
+  if [[ "$dropin_ok" == "OK" && "$rc_val" == "false" && "$bt_ok" == "OK" ]]; then
+    printf 'SAFE (no-mic-monitor.conf=%s, listenToMic=%s, bt-no-phone=%s)' "$dropin_ok" "$rc_val" "$bt_ok"
+    return 0
+  else
+    printf 'WARN (no-mic-monitor.conf=%s, listenToMic=%s, bt-no-phone=%s)' "$dropin_ok" "$rc_val" "$bt_ok"
+    return 1
+  fi
+}
+
+pause_rule_held=0
+hold_pause_rule() {
+  if [[ "$(wpctl settings linking.pause-playback 2>/dev/null | awk '$1 == "Value:" {print $2}')" == "true" ]]; then
+    pause_rule_held=1
+    trap release_pause_rule EXIT
+    wpctl settings linking.pause-playback false >/dev/null 2>&1 || true
+  fi
+}
+release_pause_rule() {
+  if (( pause_rule_held )); then
+    pause_rule_held=0
+    wpctl settings linking.pause-playback true >/dev/null 2>&1 || true
+  fi
+}
+
+take_lock() {
+  exec 9>"${XDG_RUNTIME_DIR:-/run/user/$UID}/omarchy-audio-spatial.lock"
+  if ! flock -w 20 9; then
+    echo "error: another omarchy-audio-spatial switch is in progress" >&2
+    exit 1
+  fi
+}
+
+preflight_assets() {
+  local missing=0
+  for f in "$SPATIAL_CONF" "$LADSPA_SO" "$SOFA_FILE" \
+           "$KERNELS_DIR/h_ll.wav" "$KERNELS_DIR/h_lr.wav" \
+           "$KERNELS_DIR/h_rl.wav" "$KERNELS_DIR/h_rr.wav"; do
+    if [[ ! -r "$f" ]]; then
+      echo "error: missing required spatial audio asset: $f" >&2
+      missing=1
+    fi
+  done
+  (( missing == 0 ))
+}
+
+snapshot_routing() {
+  mkdir -p "$STATE_DIR"
+  local def_sink saved_prof phys_sink
+  def_sink="$(pactl get-default-sink 2>/dev/null || true)"
+  saved_prof="$(cat "$PROFILE_STATE" 2>/dev/null || echo warm)"
+  phys_sink="$(physical_speaker_sink || true)"
+  python3 - "$SNAPSHOT_FILE" "$def_sink" "$saved_prof" "$phys_sink" <<'PY'
+import json, sys, time
+path, def_sink, saved_prof, phys_sink = sys.argv[1:5]
+data = {
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    "default_sink": def_sink,
+    "speaker_profile": saved_prof,
+    "physical_speaker_sink": phys_sink,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+PY
+}
+
+cmd_status() {
+  local ee_state eng_state def_sink saved_prof active_mode
+  ee_state="$(systemctl --user is-active "$EE_UNIT" 2>/dev/null || echo inactive)"
+  eng_state="$(systemctl --user is-active "$ENGINE_UNIT" 2>/dev/null || echo inactive)"
+  def_sink="$(pactl get-default-sink 2>/dev/null || echo unknown)"
+  saved_prof="$(cat "$PROFILE_STATE" 2>/dev/null || echo warm)"
+
+  if [[ "$eng_state" == "active" && "$def_sink" == "$SPATIAL_SINK" ]]; then
+    active_mode="PipeWire Spatial 3D (Stereo FDTR-XTC: $SPATIAL_SINK)"
+  elif [[ "$eng_state" == "active" && "$def_sink" == "$SPATIAL_71_SINK" ]]; then
+    active_mode="PipeWire Spatial 3D (7.1 SOFA + FDTR-XTC: $SPATIAL_71_SINK)"
+  elif [[ "$eng_state" == "active" ]]; then
+    active_mode="PipeWire Speaker Engine ($def_sink)"
+  elif [[ "$ee_state" == "active" ]]; then
+    active_mode="EasyEffects Warm (profile=$saved_prof)"
+  else
+    active_mode="Inactive / Raw Speaker ($def_sink)"
+  fi
+
+  local mic_guard
+  mic_guard="$(check_mic_monitor_safe || true)"
+
+  echo "=== Omarchy Spatial Audio Status ==="
+  echo "Active Engine     : $active_mode"
+  echo "Default Sink      : $def_sink"
+  echo "Systemd Units     : easyeffects=$ee_state | speaker-engine=$eng_state"
+  echo "Safety Guards     : $mic_guard"
+  echo "Data Directory    : $DATA_DIR"
+  echo "Staged PW Config  : $([[ -r "$SPATIAL_CONF" ]] && echo "READY ($SPATIAL_CONF)" || echo "MISSING")"
+  echo "Native LADSPA .so : $([[ -r "$LADSPA_SO" ]] && echo "READY ($LADSPA_SO)" || echo "MISSING")"
+  echo "SOFA HRTF         : $([[ -r "$SOFA_FILE" ]] && echo "READY ($SOFA_FILE)" || echo "MISSING")"
+
+  local k_ok=0
+  for k in h_ll.wav h_lr.wav h_rl.wav h_rr.wav; do
+    [[ -r "$KERNELS_DIR/$k" ]] && ((k_ok += 1))
+  done
+  if (( k_ok == 4 )) && [[ -r "$KERNELS_DIR/kernels_meta.json" ]]; then
+    local summary
+    summary="$(python3 - "$KERNELS_DIR/kernels_meta.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+print(f"4/4 WAV (512t@48kHz, {m['causal_delay_ms']:.2f}ms, XTC 200-2600Hz={m['xtc_200_2600_mean_db']:.2f}dB, mono_rip={m['mono_sum_max_ripple_db']:.4f}dB, pass={m['all_passed']})")
+PY
+)"
+    echo "FDTR-XTC Kernels  : $summary"
+  else
+    echo "FDTR-XTC Kernels  : INCOMPLETE ($k_ok/4 in $KERNELS_DIR)"
+  fi
+}
+
+cmd_spatial() {
+  local target_sink="${1:-$SPATIAL_SINK}"
+  take_lock
+  preflight_assets
+  snapshot_routing
+  hold_pause_rule
+
+  mkdir -p "$STATE_DIR"
+  printf '%s' "warm-deep" > "$PROFILE_STATE"
+  systemctl --user reset-failed "$ENGINE_UNIT" 2>/dev/null || true
+  if ! systemctl --user start "$ENGINE_UNIT"; then
+    echo "error: failed to start $ENGINE_UNIT; rolling back" >&2
+    cmd_warm_unlocked
+    exit 1
+  fi
+
+  local i
+  for i in $(seq 1 40); do
+    sink_present "$target_sink" && break
+    sleep 0.05
+  done
+  if ! sink_present "$target_sink"; then
+    echo "error: spatial sink $target_sink did not appear; rolling back" >&2
+    cmd_warm_unlocked
+    exit 1
+  fi
+
+  if systemctl --user is-active --quiet "$EE_UNIT" 2>/dev/null; then
+    systemctl --user stop --job-mode=ignore-dependencies "$EE_UNIT" 2>/dev/null || true
+  fi
+
+  pactl set-sink-mute "$target_sink" 0 2>/dev/null || true
+  pactl set-sink-volume "$target_sink" 100% 2>/dev/null || true
+  pactl set-default-sink "$target_sink"
+
+  while read -r idx _ _ _ _; do
+    [[ -n "${idx:-}" ]] || continue
+    pactl move-sink-input "$idx" "$target_sink" 2>/dev/null || true
+  done < <(pactl list short sink-inputs 2>/dev/null || true)
+
+  release_pause_rule
+
+  local cur_sink
+  cur_sink="$(pactl get-default-sink 2>/dev/null || echo unknown)"
+  if [[ "$cur_sink" != "$target_sink" ]]; then
+    echo "error: default sink is $cur_sink (expected $target_sink); rolling back" >&2
+    cmd_warm_unlocked
+    exit 1
+  fi
+
+  echo "Switched live -> PipeWire Spatial 3D ($target_sink)"
+  echo "Safety guards -> $(check_mic_monitor_safe || true)"
+}
+
+cmd_warm_unlocked() {
+  local phys_sink target_prof="warm"
+  if [[ -r "$SNAPSHOT_FILE" ]]; then
+    target_prof="$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])).get("speaker_profile","warm"); print("warm" if p in ("warm-deep","warm-deep-subtle","") else p)' "$SNAPSHOT_FILE" 2>/dev/null || echo warm)"
+  fi
+  phys_sink="$(physical_speaker_sink || true)"
+  [[ -n "$phys_sink" ]] && pactl set-default-sink "$phys_sink" 2>/dev/null || true
+
+  mkdir -p "$STATE_DIR"
+  printf '%s' "$target_prof" > "$PROFILE_STATE"
+
+  if systemctl --user list-unit-files "$EE_UNIT" >/dev/null 2>&1; then
+    systemctl --user start "$EE_UNIT" 2>/dev/null || true
+    local i
+    for i in $(seq 1 40); do
+      sink_present "$EE_SINK" && break
+      sleep 0.05
+    done
+  fi
+
+  if systemctl --user is-active --quiet "$ENGINE_UNIT" 2>/dev/null; then
+    systemctl --user stop "$ENGINE_UNIT" 2>/dev/null || true
+    systemctl --user reset-failed "$ENGINE_UNIT" 2>/dev/null || true
+  fi
+
+  command -v easyeffects >/dev/null 2>&1 && easyeffects --load-preset "XPS17-FIR-Warm" >/dev/null 2>&1 || true
+  systemctl --user start "$CONTROLLER_UNIT" 2>/dev/null || true
+  [[ -x "$HOME/.local/bin/omarchy-speaker-dsp-controller" ]] && "$HOME/.local/bin/omarchy-speaker-dsp-controller" apply >/dev/null 2>&1 || true
+}
+
+cmd_warm() {
+  take_lock
+  hold_pause_rule
+  cmd_warm_unlocked
+  release_pause_rule
+
+  if sink_present "$EE_SINK"; then
+    echo "Switched live -> EasyEffects Warm (sink=$EE_SINK)"
+  else
+    echo "Switched live -> Raw Physical Speaker ($(pactl get-default-sink 2>/dev/null || echo default))"
+  fi
+  echo "Safety guards -> $(check_mic_monitor_safe || true)"
+}
+
+cmd_verify() {
+  echo "[1/3] Running Rust Acoustic FFT & Full-Chain DSP Verification..."
+  nice -n 19 "$DSP_BIN" verify --kernels-dir "$KERNELS_DIR"
+  echo
+  if [[ -x "$LADSPA_TEST" ]]; then
+    echo "[2/3] Running C-ABI LADSPA Real-Time Plugin Verification..."
+    nice -n 19 "$LADSPA_TEST" "$LADSPA_SO"
+    echo
+  else
+    echo "[2/3] Skipping C-ABI LADSPA verifier ($LADSPA_TEST not installed)"
+  fi
+  echo "[3/3] Running PipeWire SPA-JSON & Filter-Graph Validation..."
+  nice -n 19 python3 "$PW_VALIDATOR"
+  echo
+  echo "ALL OFFLINE VERIFICATIONS PASSED."
+}
+
+case "${1:-status}" in
+  status)
+    cmd_status
+    ;;
+  spatial)
+    cmd_spatial "$SPATIAL_SINK"
+    ;;
+  spatial-71)
+    cmd_spatial "$SPATIAL_71_SINK"
+    ;;
+  warm|rollback)
+    cmd_warm
+    ;;
+  verify|test-offline)
+    cmd_verify
+    ;;
+  -h|--help|help)
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "usage: omarchy-audio-spatial <status|spatial|spatial-71|warm|rollback|verify|test-offline>" >&2
+    exit 2
+    ;;
+esac
