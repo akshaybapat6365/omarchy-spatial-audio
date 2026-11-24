@@ -9,7 +9,13 @@ PW_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/omarchy-speaker-engine.conf.
 NO_SWITCH=0
 [[ "${1:-}" == "--no-switch" ]] && NO_SWITCH=1
 
-if (( NO_SWITCH == 0 )) && [[ -n "${XDG_RUNTIME_DIR:-}" ]] && [[ -x "$BIN_DIR/omarchy-audio-spatial" ]]; then
+REAL_HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+LIVE_USER_HOME=0
+if [[ -n "$REAL_HOME" && "$(readlink -f "$HOME" 2>/dev/null || printf '%s' "$HOME")" == "$(readlink -f "$REAL_HOME" 2>/dev/null || printf '%s' "$REAL_HOME")" ]]; then
+  LIVE_USER_HOME=1
+fi
+
+if (( NO_SWITCH == 0 && LIVE_USER_HOME == 1 )) && [[ -n "${XDG_RUNTIME_DIR:-}" ]] && [[ -x "$BIN_DIR/omarchy-audio-spatial" ]]; then
   echo "==> Checking active audio profile before removal"
   if command -v pactl >/dev/null 2>&1; then
     cur="$(pactl get-default-sink 2>/dev/null || true)"

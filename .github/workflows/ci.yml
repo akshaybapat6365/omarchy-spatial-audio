@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Shell & Python checks
+        run: |
+          bash -n install.sh uninstall.sh PKGBUILD bin/omarchy-audio-spatial
+          python3 -m py_compile scripts/verify_pipewire_config.py
+      - name: Build Rust DSP & LADSPA library + run tests
+        run: |
+          cargo test --release
+          cargo build --release
+          ./target/release/omarchy-spatial-dsp generate --out-dir /tmp/xtc-ci-kernels
+          ./target/release/omarchy-spatial-dsp verify --in-dir /tmp/xtc-ci-kernels
+      - name: Compile & run C-ABI LADSPA verification
+        run: |
+          cc -O2 tests/verify_ladspa.c -ldl -lm -o /tmp/verify_ladspa
+          /tmp/verify_ladspa target/release/libomarchy_spatial_fdtr.so /tmp/xtc-ci-kernels
