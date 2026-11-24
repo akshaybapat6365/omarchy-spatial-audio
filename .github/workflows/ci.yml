@@ -20,8 +20,8 @@ jobs:
         run: |
           cargo test --release
           cargo build --release
-          ./target/release/omarchy-spatial-dsp generate --out-dir /tmp/xtc-ci-kernels
-          ./target/release/omarchy-spatial-dsp verify --in-dir /tmp/xtc-ci-kernels
+          ./target/release/omarchy-spatial-dsp generate-kernels --out-dir /tmp/xtc-ci-kernels
+          ./target/release/omarchy-spatial-dsp verify --kernels-dir /tmp/xtc-ci-kernels
       - name: Compile & run C-ABI LADSPA verification
         run: |
           cc -O2 tests/verify_ladspa.c -ldl -lm -o /tmp/verify_ladspa
