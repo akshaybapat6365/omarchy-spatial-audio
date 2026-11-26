@@ -5,7 +5,7 @@ A zero-dependency, pure-Rust **Choueiri Mono-Anchored FDTR Crosstalk Cancellatio
 Designed and acoustically verified for near-field top-firing laptop speakers (default geometry calibrated to Dell XPS 17 9720: `S = 34.0 cm`, `D = 55.0 cm`), with `--speaker-span-cm` and `--listening-distance-cm` flags to synthesize custom kernels for any laptop or desktop near-field setup.
 
 <p align="center">
-  <img src="assets/xtc-acoustic-response.png" alt="Measured 8192-pt FFT Acoustic Crosstalk Cancellation, Mono-Sum Flatness, and DSP Signal Chain" width="100%">
+  <a href="assets/xtc-acoustic-response.png"><img src="assets/xtc-acoustic-response.png" alt="Measured 8192-pt FFT Acoustic Crosstalk Cancellation, Mono-Sum Flatness, and DSP Signal Chain (4K)" width="100%"></a>
 </p>
 
 ## Acoustic & DSP Highlights
@@ -23,7 +23,7 @@ Designed and acoustically verified for near-field top-firing laptop speakers (de
 - **1-Second Live Switcher & Safety Guards** — `omarchy-audio-spatial` switches engines atomically under `flock`, enforces mic-monitor and Bluetooth profile guards (`no-mic-monitor.conf`, `listenToMic=false`, `bt-no-phone`), snapshots prior routing, and rolls back in `< 2 s` on failure.
 
 <p align="center">
-  <img src="assets/cli-showcase.png" alt="omarchy-audio-spatial CLI status and mode switcher showcase" width="100%">
+  <a href="assets/cli-showcase.png"><img src="assets/cli-showcase.png" alt="omarchy-audio-spatial CLI status and mode switcher showcase (4K)" width="100%"></a>
 </p>
 
 ## Quick Install
